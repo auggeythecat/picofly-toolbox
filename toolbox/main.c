@@ -25,8 +25,6 @@
 #include <libs/compr/blz.h>
 #include <libs/fatfs/ff.h>
 
-#include "hwfly.h"
-
 hekate_config h_cfg;
 const volatile ipl_ver_meta_t __attribute__((section ("._ipl_version"))) ipl_ver = {
 	.magic = BL_MAGIC,
@@ -173,6 +171,18 @@ typedef struct _pstore_buf {
 	u32 size;
 } pstore_buf_t;
 
+typedef struct _fw_info {
+        u32 signiture;
+        u32 major_version;
+        u32 minor_version;
+        u32 sdloader_hash;
+        u32 firmware_hash;
+        u32 fuse_count;
+        u32 start_offset;
+        u32 step_offset;
+        u16 offset_data[];
+} fw_info;
+
 static void _show_errors()
 {
 	u32 *excp_enabled = (u32 *)EXCP_EN_ADDR;
@@ -280,39 +290,102 @@ static void _show_errors()
 	}
 }
 
-void fw_update()
-{
+void _fw_info() {
+	u8 info[0x200];
+
 	gfx_clear_partial_grey(0x1B, 0, 1256);
 	gfx_con_setpos(0, 0);
 
-	hwfly_update_fw();
+	gfx_printf("Reading firmware info...\n");
+	emmc_initialize(false);
+	sdmmc_storage_set_mmc_partition(&emmc_storage, EMMC_BOOT0);
+	sdmmc_storage_read(&emmc_storage, 0x1fff, 1, &info);
+	sdmmc_storage_end(&emmc_storage);
 
-	gfx_printf("\n\nPress any key...\n");
+	fw_info* fw = (fw_info*)(info);
+	if (fw->signiture == 0x9CABE959) {
+		gfx_printf("Version: %d.%d\n", fw->major_version, fw->minor_version);
+		gfx_printf("FW  hash: 0x%08X\n", fw->firmware_hash);
+		gfx_printf("IPL hash: 0x%04X\n", fw->sdloader_hash);
+		gfx_printf("Fuse count: %d\n\n", fw->fuse_count);
+	}
+
+	gfx_printf("Press any key\n");
 	msleep(500);
 	btn_wait();
 }
 
-void fw_dump()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
+void _fw_update() {
+	u32 cmd[64] = { 0x6DB92148 };
+
+	gfx_clear_partial_grey(0x1b, 0, 0x4e8);
 	gfx_con_setpos(0, 0);
 
-	hwfly_dump_fw();
+	gfx_printf("Reading update.bin on sdcard\n");
+	sd_mount();
 
-	gfx_printf("\n\nPress any key...\n");
+	u32 payload_size;
+	u8* payload = sd_file_read("update.bin", &payload_size);
+	sd_end();
+
+	if (!payload) {
+		gfx_printf("update.bin not found!\n");
+		gfx_printf("Press any key\n");
+		msleep(500);
+		btn_wait();
+	}
+
+	payload_size = ALIGN(payload_size, 512);
+
+	if (payload_size > 0x3fe00) {
+		gfx_printf("update.bin is too big!\n");
+		gfx_printf("Press any key\n");
+		msleep(500);
+		btn_wait();
+	}
+
+	emmc_initialize(false);
+	sdmmc_storage_set_mmc_partition(&emmc_storage, 1);
+	sdmmc_storage_write(&emmc_storage, 0x1f80, payload_size >> 9, payload);
+    cmd[1] = 0x1f80;
+	cmd[2] = payload_size >> 9;
+	sdmmc_storage_write(&emmc_storage, 1, 1, cmd);
+	sdmmc_storage_end(&emmc_storage);
+
+	gfx_printf("Flashed! Now reboot the console to apply\n\n");
+	gfx_printf("Press any key\n");
 	msleep(500);
 	btn_wait();
 }
 
-void sdloader_update()
-{
+void _fw_rollback() {
+	u32 cmd[64] = { 0x6DB92148 };
+	cmd[1] = 0xfffffff;
+	cmd[2] = 0xfffffff;
+
+	gfx_clear_partial_grey(0x1b, 0, 0x4e8);
+	gfx_con_setpos(0, 0);
+	gfx_printf("Writing the \"firware switch\" command\n");
+
+	emmc_initialize(false);
+	sdmmc_storage_set_mmc_partition(&emmc_storage, 1);
+	sdmmc_storage_write(&emmc_storage, 1, 1, cmd);
+	sdmmc_storage_end(&emmc_storage);
+
+	gfx_printf("Done! Now reboot the console to apply\n\n");
+	gfx_printf("Press any key\n");
+	msleep(500);
+	btn_wait();
+}
+
+void _sdloader_update() {
 	gfx_clear_partial_grey(0x1B, 0, 1256);
 	gfx_con_setpos(0, 0);
 
 	gfx_printf("Reading sdloader.enc on sdcard\n");
 	sd_mount();
 	u32 payload_size;
-	uint8_t *payload = sd_file_read("sdloader.enc", &payload_size);
+	uint8_t* payload = sd_file_read("sdloader.enc", &payload_size);
 	sd_end();
 
 	if (!payload)
@@ -334,13 +407,12 @@ out:
 	btn_wait();
 }
 
-void sdloader_dump()
-{
+void _sdloader_backup() {
 	gfx_clear_partial_grey(0x1B, 0, 1256);
 	gfx_con_setpos(0, 0);
 
 	int payload_size = 64 * 1024;
-	void *payload = calloc(payload_size, 1);
+	void* payload = calloc(payload_size, 1);
 
 	gfx_printf("Reading loader from BOOT0\n");
 	emmc_initialize(false);
@@ -361,248 +433,44 @@ void sdloader_dump()
 	btn_wait();
 }
 
-void train_data_show()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
+void _train_data_reset() {
+	u32 cmd[64] = { 0x515205C5 };
+
+	gfx_clear_partial_grey(0x1b, 0, 0x4e8);
 	gfx_con_setpos(0, 0);
+	gfx_printf("Writing the \"reset chip\" command\n");
 
-	gfx_printf("Reading train data..\n");
-	uint32_t load_result;
-	config_t train_data;
-	if (!hwfly_get_train_data(&load_result, &train_data))
-	{
-		gfx_clear_partial_grey(0x1B, 0, 1256);
-		gfx_con_setpos(0, 0);
+	emmc_initialize(false);
+	sdmmc_storage_set_mmc_partition(&emmc_storage, 1);
+	sdmmc_storage_write(&emmc_storage, 1, 1, &cmd);
+	sdmmc_storage_end(&emmc_storage);
 
-		gfx_printf("Stored train data report:\n");
-
-		bool valid = load_result == 0x900D0007 &&
-					 train_data.magic == CONFIG_MAGIC &&
-					 train_data.count <= 32;
-
-		gfx_printf("Status: %k%s%k, configs count: %d\n\n", 
-				   valid ? 0xFF00FF00 : 0xFFFF0000, 
-				   valid ? "valid" : "invalid", 0xFFC0C0C0, 
-				   valid ? train_data.count : -1);
-
-		if (valid)
-		{
-			gfx_printf("  #   Used   Offset   Width\n");
-			for (int i = 0; i < train_data.count; ++i)
-			{
-				gfx_printf("%3d%7d%9d%8d\n", i + 1, train_data.timings[i].success, 
-						   train_data.timings[i].offset, train_data.timings[i].width);
-			}
-		}
-	}
-	else
-	{
-		EPRINTF("Could not obtain train data from modchip\n");
-	}
-	gfx_printf("\nPress any key\n");
-
+	gfx_printf("Done! Now reboot the console to apply\n\n");
+	gfx_printf("Press any key\n");
 	msleep(500);
 	btn_wait();
 }
 
-void train_data_backup()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
-	gfx_con_setpos(0, 0);
-
-	gfx_printf("Reading train data.. ");
-	uint32_t load_result;
-	config_t train_data;
-	if (!hwfly_get_train_data(&load_result, &train_data))
-	{
-		gfx_printf("Done\n");
-		if (load_result == 0x900D0007 &&
-			train_data.magic == CONFIG_MAGIC &&
-			train_data.count <= 32)
-		{
-			gfx_printf("Writing train_data.bin.. ");
-			sd_mount();
-			sd_save_to_file(&train_data, sizeof(config_t), "train_data.bin");
-			sd_end();
-			gfx_printf("Done\n\n");
-		}
-		else
-		{
-			EPRINTF("\nInvalid train data received. Backup failed.\n");	
-		}
-	}
-	else
-	{
-		EPRINTF("Could not obtain train data from modchip\n");
-	}
-	gfx_printf("\nPress any key\n");
-
-	msleep(500);
-	btn_wait();
-}
-
-void train_data_restore()
-{
-    gfx_clear_partial_grey(0x1B, 0, 1256);
-    gfx_con_setpos(0, 0);
-
-    gfx_printf("Reading train_data.bin from SD\n");
-	sd_mount();
-	u32 train_data_size;
-	uint8_t *train_data = sd_file_read("train_data.bin", &train_data_size);
-	sd_end();
-
-	if (!train_data)
-	{
-		gfx_printf("train_data.bin not found!\n");
-		goto out;
-	}
-	else if (train_data_size != sizeof(config_t))
-	{
-		EPRINTFARGS("Train data size %d bytes incorrect, expected %d bytes", train_data_size, sizeof(config_t));
-	}
-	else if (!hwfly_set_train_data((config_t *)train_data))
-		gfx_printf("Train data written to modchip\n");
-	else
-		EPRINTF("Failed to write train data to modchip");
-
-	free(train_data);
-
-	out:
-		gfx_printf("Press any key\n");
-	msleep(500);
-	btn_wait();
-}
-
-void train_data_reset()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
-	gfx_con_setpos(0, 0);
-
-	gfx_printf("Sending Reset Train Data command\n");
-
-	if (!hwfly_reset_train_data())
-	{
-		gfx_printf("Train data reset. Next boot will retrain.\n");
-	}
-	else
-	{
-		EPRINTF("Train data reset failed.\n");
-	}
-	gfx_printf("Press any key...\n");
-
-	msleep(500);
-	btn_wait();
-}
-
-void session_info()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
-	gfx_con_setpos(0, 0);
-
-	uint8_t fmt;
-	session_info_t si;
-	if (!hwfly_session_info(&fmt, &si))
-	{
-		if (fmt == SESSION_INFO_FORMAT_VER)
-		{
-			const char* board_type;
-			if (si.fpga_type == 0x2E49564D && si.board_id == BOARD_ID_CORE) 
-				board_type = "HWFLY CORE";
-			else if (si.fpga_type == 0x2E49564D && si.board_id == BOARD_ID_LITE) 
-				board_type = "HWFLY OLED";
-			else if (si.board_id == BOARD_ID_CORE) 
-				board_type = "SX-CORE";
-			else if (si.board_id == BOARD_ID_LITE) 
-				board_type = "SX-LITE";
-			else 
-				board_type = "Unknown";
-
-			const char* device_type;
-			if (si.device_type == DEVICE_TYPE_ERISTA)
-				device_type = "Erista";
-			else if (si.device_type == DEVICE_TYPE_MARIKO)
-				device_type = "Mariko";
-			else if (si.fpga_type == 0x2E49564D && si.board_id == BOARD_ID_LITE && si.device_type == DEVICE_TYPE_LITE)
-				device_type = "OLED";
-			else if (si.device_type == DEVICE_TYPE_LITE)
-				device_type = "Lite";
-			else
-				device_type = "Unknown";
-				
-			gfx_printf("--- Info for last glitch session ---\n\n");
-			gfx_printf("%kBoard ID:%k %s\n", 0xFFC0C0C0, 0xFF808080, board_type);
-			gfx_printf("%kDevice type:%k %s\n", 0xFFC0C0C0, 0xFF808080, device_type);
-			gfx_printf("\n");
-			gfx_printf("%kAttempts used:%k %d\n", 0xFFC0C0C0, 0xFF808080, si.glitch_attempt);
-			gfx_printf("\n");
-			gfx_printf("%kGlitch params:\n", 0xFFC0C0C0);
-			gfx_printf("%k Offset:%k %d\n", 0xFFC0C0C0, 0xFF808080, si.glitch_cfg.offset);
-			gfx_printf("%k Width:%k %d\n", 0xFFC0C0C0, 0xFF808080, si.glitch_cfg.width);
-			gfx_printf("%k Sub-cycle:%k %d\n", 0xFFC0C0C0, 0xFF808080, si.glitch_cfg.subcycle_delay);
-			gfx_printf("\n");
-			gfx_printf("%kTiming:\n", 0xFFC0C0C0);
-			gfx_printf("%k Power goal reached:%k %dus\n", 0xFFC0C0C0, 0xFF808080, si.power_threshold_reached_us);
-			gfx_printf("%k ADC goal reached:  %k %dus\n", 0xFFC0C0C0, 0xFF808080, si.adc_goal_reached_us);
-			gfx_printf("%k Glitch completed:  %k %dus\n", 0xFFC0C0C0, 0xFF808080, si.glitch_complete_us);
-			gfx_printf("%k Glitch confirmed:  %k %dus (%d reads)\n", 0xFFC0C0C0, 0xFF808080, si.glitch_confirm_us, si.flag_reads_before_glitch_confirmed);
-			gfx_printf("%k Total time:        %k %dus\n", 0xFFC0C0C0, 0xFF808080, si.total_time_us);
-			gfx_printf("\n");
-			gfx_printf("%kStartup ADC:%k %d\n", 0xFFC0C0C0, 0xFF808080, si.startup_adc_value);
-			gfx_printf("%kDevice reset:%k %s\n", 0xFFC0C0C0, 0xFF808080, si.was_the_device_reset ? "yes" : "no");
-			gfx_printf("%kPayload flashed:%k %s\n", 0xFFC0C0C0, 0xFF808080, si.payload_flashed ? "yes" : "no");
-		}
-		else
-			EPRINTF("Session info received in unknown format.\n");
-	}
-	else
-		EPRINTF("Could not retrieve session info.\n");
-
-	gfx_printf("\nPress any key...\n");
-
-	msleep(500);
-	btn_wait();
-}
-
-void deep_sleep()
-{
-	gfx_clear_partial_grey(0x1B, 0, 1256);
-	gfx_con_setpos(0, 0);
-
-	gfx_printf("Sending Deep Sleep command\n");
-	hwfly_enter_deep_sleep();
-	gfx_printf("Modchip is now in Deep Sleep\n");
-
-	gfx_printf("\nPress any key...\n");
-
-	msleep(500);
-	btn_wait();
-}
 
 power_state_t STATE_POWER_OFF           = POWER_OFF_RESET;
 
 ment_t ment_top[] = {
 	MDEF_CAPTION("--- Firmware ------", 0xFFDAFF7F),
-	MDEF_HANDLER("Update", fw_update),
-	MDEF_HANDLER("Backup", fw_dump),
+	MDEF_HANDLER("Info", _fw_info),
+	MDEF_HANDLER("Update", _fw_update),
+	MDEF_HANDLER("Rollback", _fw_rollback),
 	MDEF_CAPTION("--- SD Loader -----", 0xFFDAFF7F),
-	MDEF_HANDLER("Update", sdloader_update),
-	MDEF_HANDLER("Backup", sdloader_dump),
+	MDEF_HANDLER("Update", _sdloader_update),
+	MDEF_HANDLER("Backup", _sdloader_backup),
 	MDEF_CAPTION("--- Train data ----", 0xFFDAFF7F),
-	MDEF_HANDLER("Show stored data", train_data_show),
-	MDEF_HANDLER("Backup", train_data_backup),
-	MDEF_HANDLER("Restore", train_data_restore),
-	MDEF_HANDLER("Reset", train_data_reset),
-	MDEF_CAPTION("--- Misc. ---------", 0xFFDAFF7F),
-	MDEF_HANDLER("Glitch Session Info", session_info),
-	MDEF_HANDLER("Enter Deep Sleep", deep_sleep),
+	MDEF_HANDLER("Reset", _train_data_reset),
 	MDEF_CAPTION("-------------------", 0xFFDAFF7F),
 	MDEF_HANDLER("Back to hekate", hekate_launch),
 	MDEF_HANDLER_EX("Power off", &STATE_POWER_OFF, power_set_state_ex),
 	MDEF_END()
 };
 
-menu_t menu_top = { ment_top, "HWFLY Toolbox v1.1.1", 0, 0 };
+menu_t menu_top = { ment_top, "PicoFly Toolbox v0.2", 0, 0 };
 
 extern void pivot_stack(u32 stack_top);
 

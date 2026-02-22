@@ -25,7 +25,7 @@ VPATH += $(dir $(wildcard ./$(BDKDIR)/)) $(dir $(wildcard ./$(BDKDIR)/*/)) $(dir
 OBJS = $(addprefix $(BUILDDIR)/$(TARGET)/, \
 	start.o exception_handlers.o \
 	main.o heap.o \
-	gfx.o tui.o hwfly.o \
+	gfx.o tui.o \
 )
 
 # Hardware.
